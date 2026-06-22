@@ -100,9 +100,6 @@ class Critic(nn.Module):
             hidden_dim: int,
             use_layer_norm: bool,
             device: torch.device,
-            sim_type: str = "",
-            sim_dimension: int = 64,
-            seq_len: int = 8,
             num_q_networks: int = 2,
     ):
         super().__init__()
@@ -112,9 +109,6 @@ class Critic(nn.Module):
         self.num_atoms = num_atoms
         self.v_min = v_min
         self.v_max = v_max
-        self.sim_type = sim_type
-        self.sim_dimension = sim_dimension
-        self.seq_len = seq_len
         self.hidden_dim = hidden_dim
         self.use_layer_norm = use_layer_norm
         self.num_q_networks = num_q_networks
@@ -269,6 +263,7 @@ class QFlexActor(nn.Module):
             num_envs: int,
             std_min: float,
             std_max: float,
+            clamp_action_bounds: bool,
             action_low: float,
             action_high: float,
     ):
@@ -276,6 +271,8 @@ class QFlexActor(nn.Module):
         self.reference = reference
         self.velocity_field = velocity_field
         self.num_timesteps = num_timesteps
+
+        self.clamp_action_bounds = clamp_action_bounds
         self.action_low = action_low
         self.action_high = action_high
 
@@ -299,7 +296,8 @@ class QFlexActor(nn.Module):
             dx = self.velocity_field(obs, x, ti)
             dx = dx.clamp(-1.0 / dt, 1.0 / dt)
             x = x + dt * dx
-        return x.clamp(self.action_low, self.action_high)
+
+        return x.clamp(self.action_low, self.action_high) if self.clamp_action_bounds else x
 
     @torch.no_grad()
     def act(self, obs: torch.Tensor) -> torch.Tensor:
