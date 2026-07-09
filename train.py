@@ -116,10 +116,10 @@ def train(
         qf1, qf2 = qf_current.squeeze(-1)
         qf1_next_value, qf2_next_value = qf_next.detach().squeeze(-1)
         qf_next_value = torch.minimum(qf1_next_value, qf2_next_value)
-        qf_next_target = rewards + bootstrap * discount * qf_next_value.unsqueeze(-1)
+        qf_next_target = rewards + bootstrap * discount * qf_next_value
 
-        qf1_loss = F.mse_loss(qf1, qf_next_target.squeeze(-1))
-        qf2_loss = F.mse_loss(qf2, qf_next_target.squeeze(-1))
+        qf1_loss = F.mse_loss(qf1, qf_next_target)
+        qf2_loss = F.mse_loss(qf2, qf_next_target)
         q_loss = qf1_loss + qf2_loss
 
         q_optimizer.zero_grad(set_to_none=True)
@@ -198,7 +198,7 @@ def train(
     while global_step < cfg.num_learning_iterations:
         # --- Collection
         with torch.no_grad():
-            norm_obs = obs_normalizer(obs, update=False)
+            norm_obs = obs_normalizer(obs)
             if global_step < cfg.learning_starts:
                 actions = torch.rand((cfg.num_envs, n_act), device=device) * 2.0 - 1.0
             else:

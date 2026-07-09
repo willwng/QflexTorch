@@ -48,7 +48,7 @@ class QFlexConfig:
     num_q_networks: int = 2
     """number of Q-networks to ensemble"""
 
-    obs_normalization: bool = True
+    obs_normalization: bool = False
     """ whether to normalize observations """
 
     num_flow_steps: int = 20
