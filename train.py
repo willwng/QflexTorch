@@ -110,17 +110,17 @@ def train(
         bootstrap = (truncations | ~dones).float()
 
         with torch.no_grad():
-            next_state_actions, next_state_log_probs = reference.get_actions_and_log_probs(next_observations)
-            next_state_log_probs = next_state_log_probs.squeeze(-1).clone()
+            next_actions, next_log_probs = reference.get_actions_and_log_probs(next_observations)
+            next_log_probs = next_log_probs.squeeze(-1).clone()
             discount = cfg.gamma ** data["next"]["effective_n_steps"]
 
         qf_current, qf_next = critic.forward_joint(
-            critic_observations, actions, next_critic_observations, next_state_actions
+            critic_observations, actions, next_critic_observations, next_actions
         )
         qf1, qf2 = qf_current.squeeze(-1)
         qf1_next_value, qf2_next_value = qf_next.detach().squeeze(-1)
 
-        entropy_term = log_alpha.exp() * next_state_log_probs
+        entropy_term = log_alpha.exp() * next_log_probs
         qf1_next_value = qf1_next_value - entropy_term
         qf2_next_value = qf2_next_value - entropy_term
 
@@ -201,7 +201,6 @@ def train(
 
     # -------------------------------------------------------------- training
     obs = envs.reset()
-    dones = None
     global_step = 0
     pbar = tqdm.tqdm(total=cfg.num_learning_iterations, initial=global_step)
     while global_step < cfg.num_learning_iterations:
