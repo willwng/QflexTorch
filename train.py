@@ -1,4 +1,3 @@
-import copy
 import math
 
 import torch
@@ -7,9 +6,10 @@ import torch.optim as optim
 import tqdm
 
 from buffer import SimpleReplayBuffer, sample_and_prepare_batches, collect_experience
+from critic import Critic
 from hyperparams import QFlexConfig
-from networks import Critic, ReferencePolicy, QFlexActor, VelocityField
 from normalizers import EmpiricalNormalization
+from policy import ReferencePolicy, QFlexActor, VelocityField
 
 
 def train(
@@ -25,30 +25,24 @@ def train(
     critic = Critic(
         n_obs=n_obs,
         n_act=n_act,
-        num_atoms=cfg.num_atoms,
-        v_min=cfg.v_min,
-        v_max=cfg.v_max,
         hidden_dim=cfg.critic_hidden_dim,
-        use_layer_norm=cfg.use_layer_norm,
         num_q_networks=cfg.num_q_networks,
         device=device,
     )
-    critic_target = copy.deepcopy(critic).to(device)
-    for p in critic_target.parameters():
-        p.requires_grad_(False)
 
     reference = ReferencePolicy(
         n_obs=n_obs,
         n_act=n_act,
         hidden_dim=cfg.actor_hidden_dim,
-        layer_norm=cfg.use_layer_norm,
+        log_std_max=cfg.log_std_max,
+        log_std_min=cfg.log_std_min,
         device=device
     )
+    log_alpha = torch.tensor([math.log(cfg.alpha_init)], requires_grad=True, device=device)
     velocity_field = VelocityField(
         n_obs=n_obs,
         n_act=n_act,
         hidden_dim=cfg.velocity_hidden_dim,
-        layer_norm=cfg.use_layer_norm,
         device=device
     )
     actor = QFlexActor(
@@ -56,11 +50,6 @@ def train(
         velocity_field=velocity_field,
         num_timesteps=cfg.num_flow_steps,
         device=device,
-        n_act=n_act,
-        num_envs=cfg.num_envs,
-        std_min=cfg.std_min,
-        std_max=cfg.std_max,
-        clamp_action_bounds=cfg.clamp_action_bounds,
         action_low=action_low,
         action_high=action_high,
     ).to(device)
@@ -79,6 +68,12 @@ def train(
     )
     vel_optimizer = optim.AdamW(
         list(reference.parameters()),
+        lr=cfg.learning_rate,
+        betas=cfg.betas,
+        weight_decay=cfg.weight_decay,
+    )
+    alpha_optimizer = optim.AdamW(
+        [log_alpha],
         lr=cfg.learning_rate,
         betas=cfg.betas,
         weight_decay=cfg.weight_decay,
@@ -115,39 +110,25 @@ def train(
         bootstrap = (truncations | ~dones).float()
 
         with torch.no_grad():
-            clipped_noise = torch.randn_like(actions)
-            clipped_noise = clipped_noise.mul(cfg.policy_noise).clamp(-cfg.noise_clip, cfg.noise_clip)
-            next_actions = reference(next_observations)
-            next_actions = (next_actions + clipped_noise).clamp(action_low, action_high)
-
+            next_state_actions, next_state_log_probs = reference.get_actions_and_log_probs(next_observations)
+            next_state_log_probs = next_state_log_probs.squeeze(-1).clone()
             discount = cfg.gamma ** data["next"]["effective_n_steps"]
-            qf1_next_target_projected, qf2_next_target_projected = (
-                critic_target.projection(
-                    next_critic_observations,
-                    next_actions,
-                    rewards,
-                    bootstrap,
-                    discount,
-                )
-            )
-            qf1_next_target_value = critic_target.get_value(qf1_next_target_projected)
-            qf2_next_target_value = critic_target.get_value(qf2_next_target_projected)
-            if cfg.use_cdq:
-                qf_next_target_dist = torch.where(
-                    qf1_next_target_value.unsqueeze(1)
-                    < qf2_next_target_value.unsqueeze(1),
-                    qf1_next_target_projected,
-                    qf2_next_target_projected,
-                )
-                qf1_next_target_dist = qf2_next_target_dist = qf_next_target_dist
-            else:
-                qf1_next_target_dist, qf2_next_target_dist = (
-                    qf1_next_target_projected,
-                    qf2_next_target_projected,
-                )
-        qf1, qf2 = critic(critic_observations, actions)
-        qf1_loss = -torch.sum(qf1_next_target_dist * F.log_softmax(qf1, dim=1), dim=1).mean()
-        qf2_loss = -torch.sum(qf2_next_target_dist * F.log_softmax(qf2, dim=1), dim=1).mean()
+
+        qf_current, qf_next = critic.forward_joint(
+            critic_observations, actions, next_critic_observations, next_state_actions
+        )
+        qf1, qf2 = qf_current.squeeze(-1)
+        qf1_next_value, qf2_next_value = qf_next.detach().squeeze(-1)
+
+        entropy_term = log_alpha.exp() * next_state_log_probs
+        qf1_next_value = qf1_next_value - entropy_term
+        qf2_next_value = qf2_next_value - entropy_term
+
+        qf1_next_target = rewards + bootstrap * discount * qf1_next_value.unsqueeze(-1)
+        qf2_next_target = rewards + bootstrap * discount * qf2_next_value.unsqueeze(-1)
+
+        qf1_loss = F.mse_loss(qf1, qf1_next_target.squeeze(-1))
+        qf2_loss = F.mse_loss(qf2, qf2_next_target.squeeze(-1))
         q_loss = qf1_loss + qf2_loss
 
         q_optimizer.zero_grad(set_to_none=True)
@@ -156,14 +137,15 @@ def train(
 
         return {
             "q_loss": q_loss.detach(),
-            "q_min": qf1_next_target_value.min().detach(),
-            "q_max": qf1_next_target_value.max().detach(),
+            "q_min": qf1_next_value.min().detach(),
+            "q_max": qf1_next_value.max().detach(),
         }
 
     def update_reference(data):
-        ref_actions = reference(data["observations"])
         critic_observations = data["observations"]
-        q_value = critic.q_value(critic_observations, ref_actions, use_cdq=cfg.use_cdq)
+        actions, log_probs = reference.get_actions_and_log_probs(data["observations"])
+
+        q_value = critic.q_value(critic_observations, actions, use_cdq=False)
         ref_loss = -q_value.mean()
 
         ref_optimizer.zero_grad(set_to_none=True)
@@ -174,18 +156,17 @@ def train(
         }
 
     def update_velocity(data):
-        critic_target.eval()
+        critic.eval()
 
         next_obs = data["next"]["observations"]
         with torch.no_grad():
-            action_init = reference(next_obs)
-        q_init = critic_target.q_value(next_obs, action_init, cfg.use_cdq).detach()
+            action_init, _ = reference.get_actions_and_log_probs(next_obs)
 
         # Bounded Q-gradient ascent in action space builds the flow target.
         y = action_init.clone()
         for _ in range(cfg.grad_step_num):
             y = y.detach().requires_grad_(True)
-            q = critic_target.q_value(next_obs, y, cfg.use_cdq)
+            q = critic.q_value(next_obs, y, False)
             grad_y = torch.autograd.grad(q.sum(), y)[0]
             grad_norm = grad_y.norm(dim=1, keepdim=True)
             step = torch.minimum(
@@ -193,8 +174,7 @@ def train(
                 max_update / (grad_norm + 1e-6),
             )
             y = (y + step * grad_y).detach()
-            if cfg.clamp_action_bounds:
-                y = torch.clamp(y, action_low, action_high)
+
         action_flow_update = y
 
         # Conditional flow matching toward the straight line init -> updated
@@ -208,21 +188,16 @@ def train(
         vel_loss.backward()
         vel_optimizer.step()
 
-        q_flow = critic_target.q_value(next_obs, action_flow_update, cfg.use_cdq).detach()
+        q_init = critic.q_value(next_obs, action_init, False).detach()
+        q_flow = critic.q_value(next_obs, action_flow_update, False).detach()
+        q_flow_diff = q_flow - q_init
         return {
             "velocity_loss": vel_loss.detach(),
             "q_init": q_init.mean(),
             "q_flow_update": q_flow.mean(),
+            "q_flow_diff": q_flow_diff.mean(),
             "target_velocity_norm": target_velocity.norm(dim=1).mean().detach(),
         }
-
-    @torch.no_grad()
-    def update_target():
-        src_ps = [p.data for p in critic.parameters()]
-        tgt_ps = [p.data for p in critic_target.parameters()]
-        torch._foreach_mul_(tgt_ps, 1.0 - cfg.tau)
-        torch._foreach_add_(tgt_ps, src_ps, alpha=cfg.tau)
-        return
 
     # -------------------------------------------------------------- training
     obs = envs.reset()
@@ -237,7 +212,7 @@ def train(
                 actions = torch.rand((cfg.num_envs, n_act), device=device) * 2.0 - 1.0
             else:
                 actor.eval()
-                actions = actor.explore(norm_obs, dones)
+                actions = actor.explore(norm_obs)
 
         next_obs, rewards, terminated, truncations, info = envs.step(actions)
         collect_experience(
@@ -262,7 +237,6 @@ def train(
                 elif global_step % cfg.policy_frequency == 0:
                     r_logs = update_reference(data)
                     v_logs = update_velocity(data)
-                update_target()
 
         global_step += 1
         pbar.update(1)

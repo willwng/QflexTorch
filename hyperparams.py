@@ -15,8 +15,6 @@ class QFlexConfig:
     """AdamW betas"""
     weight_decay: float = 0.001
     """AdamW weight_decay"""
-    tau: float = 0.1
-    """the soft update coefficient"""
 
     buffer_size: int = 256 * 20
     """the replay memory buffer size per environment"""
@@ -34,34 +32,23 @@ class QFlexConfig:
     policy_frequency: int = 4
     """the frequency of training policy (delayed)"""
 
-    std_min: float = 0.001
-    """minimum scale of exploration noise"""
-    std_max: float = 0.4
-    """maximum scale of exploration noise"""
-
-    num_atoms: int = 101
-    """the number of atoms (distributional Critic)"""
-    v_min: float = -10.0
-    """the minimum value of the support"""
-    v_max: float = 10.0
-    """the maximum value of the support"""
-    critic_hidden_dim: int = 768
-    """the hidden dimension of the critic network"""
-    use_layer_norm: bool = False
-    """whether to use layer normalization"""
-    num_q_networks: int = 2
-    """number of Q-networks to ensemble"""
-    policy_noise: float = 0.001
-    """the scale of target action noise"""
-    noise_clip: float = 0.5
-    """the clip range of target action noise"""
-    use_cdq: bool = True
-    """whether to use Clipped Double Q-learning"""
-
     actor_hidden_dim: int = 512
     """the hidden dimension of the actor network"""
     velocity_hidden_dim: int = 768
     """hidden dimension of velocity network"""
+    log_std_max: float = 0.0
+    """the maximum value of the log std"""
+    log_std_min: float = -5.0
+    """the minimum value of the log std"""
+    alpha_init: float = 0.0
+    """the initial value of the alpha"""
+    alpha_learning_rate: float = 3e-4
+    """the learning rate for the alpha"""
+
+    critic_hidden_dim: int = 768
+    """the hidden dimension of the critic network"""
+    num_q_networks: int = 2
+    """number of Q-networks to ensemble"""
 
     obs_normalization: bool = True
     """ whether to normalize observations """
