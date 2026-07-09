@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
 
+from blocks import build_bn_mlp
+
 
 class ReferencePolicy(nn.Module):
     def __init__(
@@ -13,6 +15,7 @@ class ReferencePolicy(nn.Module):
             device: torch.device | str | None = None,
             action_scale: torch.Tensor | None = None,
             action_bias: torch.Tensor | None = None,
+            num_hidden_layers: int = 3,
     ):
         super().__init__()
         self.n_obs = n_obs
@@ -21,6 +24,7 @@ class ReferencePolicy(nn.Module):
         self.log_std_min = log_std_min
         self.device = device
         self.hidden_dim = hidden_dim
+        self.num_hidden_layers = num_hidden_layers
 
         # Setup the network - this will be overridden in subclasses if needed
         self.setup_network()
@@ -41,32 +45,19 @@ class ReferencePolicy(nn.Module):
         self._setup_network_with_input_dim(self.n_obs)
 
     def _setup_network_with_input_dim(self, input_dim: int) -> None:
-        """Setup network with specific input dimension."""
-        self.net = nn.Sequential(
-            nn.Linear(input_dim, self.hidden_dim, device=self.device),
-            nn.SiLU(),
-            nn.Linear(self.hidden_dim, self.hidden_dim // 2, device=self.device),
-            nn.SiLU(),
-            nn.Linear(self.hidden_dim // 2, self.hidden_dim // 4, device=self.device),
-            nn.SiLU(),
+        """Setup network with specific input dimension. """
+        self.net = build_bn_mlp(
+            input_dim,
+            [self.hidden_dim] * self.num_hidden_layers,
+            self.n_act * 2,
+            nn.ReLU,
+            device=self.device,
         )
-        self.fc_mu = nn.Sequential(
-            nn.Linear(self.hidden_dim // 4, self.n_act, device=self.device),
-        )
-        self.fc_logstd = nn.Linear(self.hidden_dim // 4, self.n_act, device=self.device)
-        nn.init.constant_(self.fc_mu[0].weight, 0.0)
-        nn.init.constant_(self.fc_mu[0].bias, 0.0)
-        nn.init.constant_(self.fc_logstd.weight, 0.0)
-        nn.init.constant_(self.fc_logstd.bias, 0.0)
 
     def forward(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        x = self.net(obs)
-        mean = self.fc_mu(x)
-        log_std = self.fc_logstd(x)
-        log_std = torch.tanh(log_std)
-        log_std = self.log_std_min + 0.5 * (self.log_std_max - self.log_std_min) * (
-                log_std + 1
-        )  # From SpinUp / Denis Yarats
+        output = self.net(obs)
+        mean, log_std = output.chunk(2, dim=-1)
+        log_std = torch.clamp(log_std, self.log_std_min, self.log_std_max)
         tanh_mean = torch.tanh(mean)
         action = tanh_mean * self.action_scale + self.action_bias
         return action, mean, log_std
@@ -107,16 +98,15 @@ class VelocityField(nn.Module):
             n_act: int,
             hidden_dim: int,
             device: torch.device,
+            num_hidden_layers: int = 3,
     ):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(n_obs + n_act + 1, hidden_dim, device=device),
-            nn.SiLU(),
-            nn.Linear(hidden_dim, hidden_dim // 2, device=device),
-            nn.SiLU(),
-            nn.Linear(hidden_dim // 2, hidden_dim // 4, device=device),
-            nn.SiLU(),
-            nn.Linear(hidden_dim // 4, n_act, device=device),
+        self.net = build_bn_mlp(
+            n_obs + n_act + 1,
+            [hidden_dim] * num_hidden_layers,
+            n_act,
+            nn.ReLU,
+            device=device,
         )
 
     def forward(self, obs: torch.Tensor, act: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
