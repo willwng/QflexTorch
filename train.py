@@ -96,6 +96,7 @@ def train(
     # ---------------------------------------------------------- update steps
     def update_critic(data):
         critic.train()
+        reference.eval()
         observations = data["observations"]
         next_observations = data["next"]["observations"]
         critic_observations = observations
@@ -134,6 +135,7 @@ def train(
 
     def update_reference(data):
         critic.eval()
+        reference.train()
         critic_observations = data["observations"]
         actions, log_probs = reference.get_actions_and_log_probs(data["observations"])
 
@@ -149,6 +151,8 @@ def train(
 
     def update_velocity(data):
         critic.eval()
+        reference.eval()
+        velocity_field.train()
 
         next_obs = data["next"]["observations"]
         with torch.no_grad():
